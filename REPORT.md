@@ -177,3 +177,9 @@ Both files match each other byte-for-byte and match the server content for this 
 - Persistence (optional): `job_manager.c` (`job_manager_load_persisted`, `job_manager_enable_persistence`) and `job.c` (`download_job_save_state`, `download_job_load_state`).
 - Portability (POSIX): use of pthreads, pwrite, and standard C in `scheduler.c`, `job.c`, `util.c`.
 - Clean shutdown/resource cleanup: `job.c` (`download_job_join`, cleanup blocks), `scheduler.c` (`worker_pool_join`, `scheduler_destroy`).
+
+## Test Links
+- https://httpbin.org/image/png (Fallback)
+- https://cdn.hasselblad.com/f/77891/11656x8742/0b7db9801e/x-system_02_download.jpg
+- https://cdn.hasselblad.com/f/77891/8767x8742/6e0ec7b129/x-system_04_download.jpg
+- https://www.sony.co.jp/en/Products/di_photo-gallery/images/extralarge/2146.JPG
