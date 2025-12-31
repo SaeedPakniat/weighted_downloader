@@ -323,7 +323,8 @@ int downloader_run_interactive(const char *url, const char *output_path,
 
     // Create progress/logging threads
     progress_ctx_t pctx;
-    if (progress_init(&pctx, &sched, P, size, cfg->progress_interval_ms, cfg->csv_sample_interval_ms) != 0) {
+    if (progress_init(&pctx, &sched, P, size, cfg->progress_interval_ms,
+                      cfg->csv_sample_interval_ms, cfg->ui_enabled) != 0) {
         fprintf(stderr, "progress_init failed\n");
         scheduler_destroy(&sched);
         close(fd);

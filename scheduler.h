@@ -45,6 +45,7 @@ typedef struct scheduler {
     task_block_t *retry_head;
     task_block_t *retry_tail;
 
+    int paused;
     int shutdown;
 } scheduler_t;
 
@@ -58,6 +59,8 @@ void scheduler_mark_downloaded(scheduler_t *s, int partition_id, int64_t bytes);
 
 int scheduler_all_done(scheduler_t *s);
 void scheduler_signal_shutdown(scheduler_t *s);
+void scheduler_set_paused(scheduler_t *s, int paused);
+int scheduler_is_paused(scheduler_t *s);
 
 // For progress thread
 int scheduler_snapshot(scheduler_t *s, int64_t *per_part_downloaded, int *per_part_finished,

@@ -14,6 +14,7 @@ typedef struct progress_ctx {
 
     int progress_interval_ms;
     int csv_sample_interval_ms;
+    int ui_enabled;
 
     pthread_t thread;
     pthread_t csv_thread;
@@ -27,7 +28,7 @@ typedef struct progress_ctx {
 } progress_ctx_t;
 
 int progress_init(progress_ctx_t *p, scheduler_t *sched, int P, int64_t file_size,
-                  int progress_interval_ms, int csv_sample_interval_ms);
+                  int progress_interval_ms, int csv_sample_interval_ms, int ui_enabled);
 
 int progress_start(progress_ctx_t *p, const char *csv_path);
 void progress_stop(progress_ctx_t *p);

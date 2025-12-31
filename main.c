@@ -11,7 +11,7 @@
 static void usage(const char *prog) {
     fprintf(stderr,
         "Usage:\n"
-        "  %s <URL> [output_file]\n\n"
+        "  %s [--no-ui] <URL> [output_file]\n\n"
         "You will be prompted for partitions/weights and optional worker threads.\n",
         prog);
 }
@@ -22,8 +22,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    const char *url = argv[1];
-    const char *out = (argc >= 3) ? argv[2] : "output.bin";
+    int argi = 1;
+    int ui_enabled = 1;
+    if (strcmp(argv[argi], "--no-ui") == 0) {
+        ui_enabled = 0;
+        argi++;
+    }
+    if (argc - argi < 1) {
+        usage(argv[0]);
+        return 1;
+    }
+
+    const char *url = argv[argi];
+    const char *out = (argc - argi >= 2) ? argv[argi + 1] : "output.bin";
 
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
         fprintf(stderr, "curl_global_init failed\n");
@@ -39,6 +50,7 @@ int main(int argc, char **argv) {
     cfg.low_speed_limit_bytes = 1024; // 1KB/s for 15s triggers timeout
     cfg.progress_interval_ms = 200;
     cfg.csv_sample_interval_ms = 200;
+    cfg.ui_enabled = ui_enabled;
 
     printf("URL: %s\nOutput: %s\n", url, out);
 

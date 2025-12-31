@@ -1,7 +1,7 @@
 CC=gcc
 CFLAGS=-O2 -Wall -Wextra -pedantic -std=c11
 LDFLAGS=
-LDLIBS=-lcurl -lpthread
+LDLIBS=-lcurl -lpthread -lncurses
 
 OBJS=main.o downloader.o scheduler.o progress.o util.o
 

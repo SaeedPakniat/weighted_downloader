@@ -33,6 +33,7 @@ int scheduler_init(scheduler_t *s, int P, int64_t file_size, size_t block_size,
     s->block_size = block_size;
     s->max_retries = max_retries;
     s->rr_index = 0;
+    s->paused = 0;
 
     if (pthread_mutex_init(&s->mtx, NULL) != 0) return -1;
     if (pthread_cond_init(&s->cv, NULL) != 0) {
@@ -107,6 +108,20 @@ void scheduler_signal_shutdown(scheduler_t *s) {
     s->shutdown = 1;
     pthread_cond_broadcast(&s->cv);
     pthread_mutex_unlock(&s->mtx);
+}
+
+void scheduler_set_paused(scheduler_t *s, int paused) {
+    pthread_mutex_lock(&s->mtx);
+    s->paused = paused ? 1 : 0;
+    pthread_cond_broadcast(&s->cv);
+    pthread_mutex_unlock(&s->mtx);
+}
+
+int scheduler_is_paused(scheduler_t *s) {
+    pthread_mutex_lock(&s->mtx);
+    int paused = s->paused;
+    pthread_mutex_unlock(&s->mtx);
+    return paused;
 }
 
 void scheduler_requeue_task(scheduler_t *s, const task_block_t *t) {
@@ -227,6 +242,15 @@ int scheduler_get_task(scheduler_t *s, task_block_t *out) {
     pthread_mutex_lock(&s->mtx);
 
     while (!s->shutdown) {
+        if (all_done_nolock(s)) {
+            pthread_mutex_unlock(&s->mtx);
+            return 0;
+        }
+        while (s->paused && !s->shutdown) {
+            pthread_cond_wait(&s->cv, &s->mtx);
+        }
+        if (s->shutdown) break;
+
         int got = drr_pick_next_block_nolock(s, out);
         if (got) {
             pthread_mutex_unlock(&s->mtx);
