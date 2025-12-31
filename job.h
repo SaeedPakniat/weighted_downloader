@@ -59,3 +59,5 @@ int download_job_load_state(download_job_t *job, const char *state_path);
 
 int download_job_snapshot(download_job_t *job, int64_t *out_total_downloaded,
                           int64_t *out_file_size, download_job_state_t *out_state);
+int download_job_snapshot_parts(download_job_t *job, int64_t *per_part_downloaded,
+                                int *per_part_finished, int P);

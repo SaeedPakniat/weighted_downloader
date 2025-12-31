@@ -3,7 +3,7 @@
   "jobs": [
     {
       "url": "https://cdn.hasselblad.com/f/77891/11656x8742/0b7db9801e/x-system_02_download.jpg",
-      "output": "x-system_02_download_10_5_1_report.jpg",
+      "output": "guidownload.jpg",
       "state": "done",
       "file_size": 112676898,
       "range_supported": 1,
@@ -12,7 +12,7 @@
       "block_size": 131072,
       "max_retries": 5,
       "weights": [10, 5, 1],
-      "state_path": "x-system_02_download_10_5_1_report.jpg.wdstate"
+      "state_path": "guidownload.jpg.wdstate"
     }
   ]
 }

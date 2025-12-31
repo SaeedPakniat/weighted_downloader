@@ -24,11 +24,24 @@ typedef struct gui_job_row {
     GtkWidget *pause_btn;
     GtkWidget *resume_btn;
     GtkWidget *delete_btn;
+    GtkWidget *parts_box;
+    GPtrArray *part_rows;
+    int P;
+    int *weights;
+    int64_t *part_sizes;
+    int64_t *part_downloaded;
+    int *part_finished;
     int64_t last_total;
     int64_t last_ms;
     double smoothed_bps;
     int deleting;
 } gui_job_row_t;
+
+typedef struct gui_part_row {
+    GtkWidget *row;
+    GtkProgressBar *bar;
+    GtkLabel *label;
+} gui_part_row_t;
 
 typedef struct gui_ctx {
     job_manager_t *jm;
@@ -95,6 +108,15 @@ static void format_eta(char *buf, size_t buflen, double seconds) {
     int s = sec % 60;
     if (h > 0) snprintf(buf, buflen, "%02d:%02d:%02d", h, m, s);
     else snprintf(buf, buflen, "%02d:%02d", m, s);
+}
+
+static void compute_partition_sizes(int64_t total, int P, int64_t *out_sizes) {
+    if (!out_sizes || P <= 0) return;
+    int64_t base = total / P;
+    int64_t rem = total % P;
+    for (int i = 0; i < P; i++) {
+        out_sizes[i] = base + (i < rem ? 1 : 0);
+    }
 }
 
 static const char *state_label(download_job_state_t st) {
@@ -202,6 +224,17 @@ static void apply_css(void) {
 
 static void gui_job_row_free(gui_job_row_t *row) {
     if (!row) return;
+    if (row->part_rows) {
+        for (guint i = 0; i < row->part_rows->len; i++) {
+            gui_part_row_t *p = (gui_part_row_t*)g_ptr_array_index(row->part_rows, i);
+            free(p);
+        }
+        g_ptr_array_free(row->part_rows, TRUE);
+    }
+    free(row->weights);
+    free(row->part_sizes);
+    free(row->part_downloaded);
+    free(row->part_finished);
     free(row);
 }
 
@@ -239,6 +272,36 @@ static gui_job_row_t *gui_job_row_new(download_job_t *job) {
     gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(bar), TRUE);
     gtk_widget_add_css_class(bar, "job-bar");
     gtk_box_append(GTK_BOX(card), bar);
+
+    GtkWidget *parts_box = NULL;
+    GPtrArray *part_rows = NULL;
+    if (meta.P > 0 && meta.file_size > 0 && meta.range_supported) {
+        parts_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+        part_rows = g_ptr_array_new();
+        gtk_widget_set_margin_top(parts_box, 4);
+        gtk_widget_set_margin_bottom(parts_box, 2);
+        for (int i = 0; i < meta.P; i++) {
+            GtkWidget *pbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+            GtkWidget *plabel = gtk_label_new("");
+            gtk_widget_add_css_class(plabel, "meta");
+            gtk_widget_set_halign(plabel, GTK_ALIGN_START);
+            GtkWidget *pbar = gtk_progress_bar_new();
+            gtk_progress_bar_set_show_text(GTK_PROGRESS_BAR(pbar), TRUE);
+            gtk_widget_add_css_class(pbar, "job-bar");
+            gtk_box_append(GTK_BOX(pbox), plabel);
+            gtk_box_append(GTK_BOX(pbox), pbar);
+            gtk_box_append(GTK_BOX(parts_box), pbox);
+
+            gui_part_row_t *prow = (gui_part_row_t*)calloc(1, sizeof(*prow));
+            if (prow) {
+                prow->row = pbox;
+                prow->bar = GTK_PROGRESS_BAR(pbar);
+                prow->label = GTK_LABEL(plabel);
+                g_ptr_array_add(part_rows, prow);
+            }
+        }
+        gtk_box_append(GTK_BOX(card), parts_box);
+    }
 
     GtkWidget *info_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
     GtkWidget *bytes_label = gtk_label_new("Downloaded: --");
@@ -282,6 +345,21 @@ static gui_job_row_t *gui_job_row_new(download_job_t *job) {
     row->pause_btn = pause_btn;
     row->resume_btn = resume_btn;
     row->delete_btn = delete_btn;
+    row->parts_box = parts_box;
+    row->part_rows = part_rows;
+    row->P = meta.P;
+    if (meta.P > 0 && meta.weights) {
+        row->weights = (int*)calloc((size_t)meta.P, sizeof(int));
+        if (row->weights) {
+            memcpy(row->weights, meta.weights, (size_t)meta.P * sizeof(int));
+        }
+    }
+    if (meta.P > 0 && meta.file_size > 0 && meta.range_supported) {
+        row->part_sizes = (int64_t*)calloc((size_t)meta.P, sizeof(int64_t));
+        row->part_downloaded = (int64_t*)calloc((size_t)meta.P, sizeof(int64_t));
+        row->part_finished = (int*)calloc((size_t)meta.P, sizeof(int));
+        if (row->part_sizes) compute_partition_sizes(meta.file_size, meta.P, row->part_sizes);
+    }
 
     download_job_meta_free(&meta);
     return row;
@@ -732,6 +810,41 @@ static gboolean gui_tick(gpointer data) {
         gtk_widget_set_sensitive(row->pause_btn, st == JOB_RUNNING);
         gtk_widget_set_sensitive(row->resume_btn, st == JOB_PAUSED);
         gtk_widget_set_sensitive(row->delete_btn, st != JOB_STOPPING);
+
+        if (row->P > 0 && row->part_rows && row->part_downloaded && row->part_sizes) {
+            if (download_job_snapshot_parts(row->job, row->part_downloaded, row->part_finished, row->P) == 0) {
+                for (int p = 0; p < row->P && p < (int)row->part_rows->len; p++) {
+                    gui_part_row_t *prow = (gui_part_row_t*)g_ptr_array_index(row->part_rows, p);
+                    if (!prow) continue;
+                    int64_t psize = row->part_sizes[p];
+                    int64_t pdl = row->part_downloaded[p];
+                    if (pdl < 0) pdl = 0;
+                    if (psize > 0 && pdl > psize) pdl = psize;
+                    double pfrac = (psize > 0) ? (double)pdl / (double)psize : 0.0;
+                    if (pfrac < 0.0) pfrac = 0.0;
+                    if (pfrac > 1.0) pfrac = 1.0;
+
+                    char ptotal_buf[32];
+                    char psize_buf[32];
+                    format_bytes(ptotal_buf, sizeof(ptotal_buf), pdl);
+                    if (psize > 0) format_bytes(psize_buf, sizeof(psize_buf), psize);
+                    else snprintf(psize_buf, sizeof(psize_buf), "?");
+
+                    int w = row->weights ? row->weights[p] : 1;
+                    char plabel[160];
+                    snprintf(plabel, sizeof(plabel), "Part %d (w=%d): %s / %s%s",
+                             p, w, ptotal_buf, psize_buf,
+                             (row->part_finished && row->part_finished[p]) ? " DONE" : "");
+                    gtk_label_set_text(prow->label, plabel);
+
+                    char ppct[32];
+                    if (psize > 0) snprintf(ppct, sizeof(ppct), "%.2f%%", 100.0 * pfrac);
+                    else snprintf(ppct, sizeof(ppct), "--");
+                    gtk_progress_bar_set_fraction(prow->bar, psize > 0 ? pfrac : 0.0);
+                    gtk_progress_bar_set_text(prow->bar, ppct);
+                }
+            }
+        }
 
         if (st == JOB_RUNNING) {
             total_speed += (int64_t)row->smoothed_bps;

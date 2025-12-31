@@ -1058,6 +1058,21 @@ int download_job_snapshot(download_job_t *job, int64_t *out_total_downloaded,
     return 0;
 }
 
+int download_job_snapshot_parts(download_job_t *job, int64_t *per_part_downloaded,
+                                int *per_part_finished, int P) {
+    if (!job || !per_part_downloaded || P <= 0) return -1;
+
+    pthread_mutex_lock(&job->mtx);
+    int sched_inited = job->sched_inited;
+    int jobP = job->P;
+    pthread_mutex_unlock(&job->mtx);
+
+    if (!sched_inited || jobP != P) return -1;
+
+    scheduler_snapshot(&job->sched, per_part_downloaded, per_part_finished, NULL);
+    return 0;
+}
+
 int download_job_save_state(const download_job_t *job, const char *state_path) {
     if (!job || !state_path) return -1;
 

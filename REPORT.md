@@ -7,8 +7,6 @@ Student ID: 40139537
 
 - OS: Arch Linux
 - Kernel: Linux 6.18.2-arch2-1 x86_64
-- CPU: 12th Gen Intel(R) Core(TM) i7-12700H (20 logical CPUs)
-- RAM: 15 GiB
 - libcurl: 8.17.0
 - gcc: 15.2.1
 
