@@ -47,6 +47,7 @@ Example GUI run:
 ```bash
 ./weighted_downloader --gui <URL> out.bin
 ```
+You can also start the GUI with no URL and add downloads from the dialog.
 
 ### Controls (ncurses UI)
 
@@ -56,8 +57,9 @@ Example GUI run:
 
 ### GUI Controls
 
-- Pause / Resume buttons
-- Quit button or window close (signals shutdown and exits cleanly)
+- Add Download dialog (URL + output path)
+- Per-job Pause / Resume / Delete
+- Live per-job progress, speed, ETA (via periodic snapshots)
 
 ## Architecture (Phase 1)
 

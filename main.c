@@ -6,6 +6,7 @@
 #include <errno.h>
 
 #include "downloader.h"
+#include "gui.h"
 #include "job_manager.h"
 #include "util.h"
 
@@ -69,7 +70,7 @@ int main(int argc, char **argv) {
     cfg.csv_sample_interval_ms = 200;
     cfg.ui_enabled = ui_enabled;
     cfg.output_enabled = output_enabled;
-    cfg.gui_enabled = gui_enabled;
+    cfg.gui_enabled = 0;
 
     job_manager_t jm;
     if (job_manager_init(&jm, 1) != 0) {
@@ -97,23 +98,46 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!have_url && loaded == 0) {
+    if (!gui_enabled && !have_url && loaded == 0) {
         fprintf(stderr, "No persisted downloads to resume.\n");
         job_manager_destroy(&jm);
         curl_global_cleanup();
         return 1;
     }
 
-    job_manager_start(&jm);
-    job_manager_wait_all(&jm);
-    job_manager_stop(&jm);
-
-    int count = job_manager_count(&jm);
     int overall_ok = 1;
-    for (int i = 0; i < count; i++) {
-        download_job_t *job = job_manager_get(&jm, i);
-        if (download_job_result(job) != 0) overall_ok = 0;
-        download_job_destroy(job);
+    if (gui_enabled) {
+        gui_removed_jobs_t removed = {0};
+        job_manager_start(&jm);
+        if (gui_run(&jm, &cfg, &removed) != 0) {
+            fprintf(stderr, "GUI exited with errors.\n");
+            overall_ok = 0;
+        }
+        job_manager_stop(&jm);
+        job_manager_wait_all(&jm);
+
+        int count = job_manager_count(&jm);
+        for (int i = 0; i < count; i++) {
+            download_job_t *job = job_manager_get(&jm, i);
+            if (download_job_result(job) != 0) overall_ok = 0;
+            download_job_destroy(job);
+        }
+        for (size_t i = 0; i < removed.count; i++) {
+            if (download_job_result(removed.jobs[i]) != 0) overall_ok = 0;
+            download_job_destroy(removed.jobs[i]);
+        }
+        free(removed.jobs);
+    } else {
+        job_manager_start(&jm);
+        job_manager_wait_all(&jm);
+        job_manager_stop(&jm);
+
+        int count = job_manager_count(&jm);
+        for (int i = 0; i < count; i++) {
+            download_job_t *job = job_manager_get(&jm, i);
+            if (download_job_result(job) != 0) overall_ok = 0;
+            download_job_destroy(job);
+        }
     }
     job_manager_destroy(&jm);
 

@@ -1,8 +1,13 @@
 #pragma once
 
-#include <stdint.h>
+#include <stddef.h>
 
-#include "scheduler.h"
+#include "downloader.h"
+#include "job_manager.h"
 
-int gui_run(scheduler_t *sched, int P, int64_t file_size,
-            const int *weights, const int64_t *part_sizes);
+typedef struct gui_removed_jobs {
+    download_job_t **jobs;
+    size_t count;
+} gui_removed_jobs_t;
+
+int gui_run(job_manager_t *jm, const downloader_config_t *cfg, gui_removed_jobs_t *out_removed);

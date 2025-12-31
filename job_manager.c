@@ -697,6 +697,31 @@ int job_manager_count(job_manager_t *jm) {
     return count;
 }
 
+int job_manager_remove(job_manager_t *jm, download_job_t *job) {
+    if (!jm || !job) return -1;
+    pthread_mutex_lock(&jm->mtx);
+    size_t idx = jm->count;
+    for (size_t i = 0; i < jm->count; i++) {
+        if (jm->jobs[i] == job) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx == jm->count) {
+        pthread_mutex_unlock(&jm->mtx);
+        return -1;
+    }
+    for (size_t i = idx + 1; i < jm->count; i++) {
+        jm->jobs[i - 1] = jm->jobs[i];
+    }
+    jm->count--;
+    jm->dirty = 1;
+    jm->persist_dirty = 1;
+    pthread_cond_signal(&jm->cv);
+    pthread_mutex_unlock(&jm->mtx);
+    return 0;
+}
+
 int job_manager_wait_all(job_manager_t *jm) {
     if (!jm) return -1;
     while (1) {

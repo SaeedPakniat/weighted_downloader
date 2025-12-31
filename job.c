@@ -14,7 +14,6 @@
 
 #include <curl/curl.h>
 
-#include "gui.h"
 #include "progress.h"
 #include "scheduler.h"
 #include "util.h"
@@ -39,8 +38,6 @@ struct download_job {
 
     int64_t file_size;
     int range_supported; // -1 unknown, 0 no, 1 yes
-
-    int64_t *part_sizes;
 
     int out_fd;
 
@@ -69,6 +66,9 @@ struct download_job {
     int64_t resume_file_size;
     int64_t *resume_next_off;
     int64_t *resume_downloaded;
+
+    int64_t single_total;
+    int64_t single_now;
 };
 
 static size_t header_cb(char *buffer, size_t size, size_t nitems, void *userdata) {
@@ -345,6 +345,10 @@ static int single_thread_xferinfo(void *clientp, curl_off_t dltotal, curl_off_t 
     (void)ultotal;
     (void)ulnow;
     download_job_t *job = (download_job_t*)clientp;
+    pthread_mutex_lock(&job->mtx);
+    if (dltotal > 0) job->single_total = (int64_t)dltotal;
+    job->single_now = (int64_t)dlnow;
+    pthread_mutex_unlock(&job->mtx);
     return job_should_stop(job) ? 1 : 0;
 }
 #else
@@ -355,6 +359,10 @@ static int single_thread_progress(void *clientp, double dltotal, double dlnow,
     (void)ultotal;
     (void)ulnow;
     download_job_t *job = (download_job_t*)clientp;
+    pthread_mutex_lock(&job->mtx);
+    if (dltotal > 0.0) job->single_total = (int64_t)dltotal;
+    job->single_now = (int64_t)dlnow;
+    pthread_mutex_unlock(&job->mtx);
     return job_should_stop(job) ? 1 : 0;
 }
 #endif
@@ -461,15 +469,6 @@ static int download_job_run(download_job_t *job) {
 
     printf("Server supports Range requests. Content-Length = %" PRId64 " bytes\n", size);
 
-    if (job->cfg.gui_enabled) {
-        job->part_sizes = (int64_t*)xcalloc((size_t)job->P, sizeof(int64_t));
-        int64_t base = size / job->P;
-        int64_t rem = size % job->P;
-        for (int i = 0; i < job->P; i++) {
-            job->part_sizes[i] = base + (i < rem ? 1 : 0);
-        }
-    }
-
     int resume_available = 0;
     pthread_mutex_lock(&job->mtx);
     resume_available = job->resume_loaded;
@@ -563,15 +562,6 @@ static int download_job_run(download_job_t *job) {
     }
     job->pool_started = 1;
 
-    int gui_rc = 0;
-    if (job->cfg.gui_enabled) {
-        gui_rc = gui_run(&job->sched, job->P, size, job->weights, job->part_sizes);
-        if (gui_rc != 0) {
-            fprintf(stderr, "gui_run failed\n");
-            scheduler_signal_shutdown(&job->sched);
-        }
-    }
-
     worker_pool_join(&job->pool);
     job->pool_started = 0;
 
@@ -592,10 +582,7 @@ static int download_job_run(download_job_t *job) {
     close(fd);
     job->out_fd = -1;
 
-    free(job->part_sizes);
-    job->part_sizes = NULL;
-
-    if (gui_rc != 0 || !ok) {
+    if (!ok) {
         fprintf(stderr, "Not all partitions completed.\n");
         return -1;
     }
@@ -668,6 +655,8 @@ download_job_t *download_job_create(const char *url, const char *output_path,
     job->resume_file_size = 0;
     job->resume_next_off = NULL;
     job->resume_downloaded = NULL;
+    job->single_total = 0;
+    job->single_now = 0;
 
     return job;
 }
@@ -680,7 +669,6 @@ void download_job_destroy(download_job_t *job) {
     }
 
     free(job->weights);
-    free(job->part_sizes);
     job_clear_resume(job);
     free(job->url);
     free(job->output_path);
@@ -810,6 +798,12 @@ int download_job_stop(download_job_t *job) {
     if (!job) return -1;
 
     pthread_mutex_lock(&job->mtx);
+    if (job->state == JOB_IDLE) {
+        job->stop_requested = 1;
+        job->state = JOB_STOPPED;
+        pthread_mutex_unlock(&job->mtx);
+        return 0;
+    }
     if (job->state != JOB_RUNNING && job->state != JOB_PAUSED && job->state != JOB_STOPPING) {
         pthread_mutex_unlock(&job->mtx);
         return -1;
@@ -904,6 +898,38 @@ void download_job_meta_free(download_job_meta_t *meta) {
     free(meta->output_path);
     free(meta->weights);
     memset(meta, 0, sizeof(*meta));
+}
+
+int download_job_snapshot(download_job_t *job, int64_t *out_total_downloaded,
+                          int64_t *out_file_size, download_job_state_t *out_state) {
+    if (!job) return -1;
+
+    int sched_inited = 0;
+    int64_t size = 0;
+    int64_t single_total = 0;
+    int64_t single_now = 0;
+    download_job_state_t st = JOB_ERROR;
+
+    pthread_mutex_lock(&job->mtx);
+    sched_inited = job->sched_inited;
+    size = job->file_size;
+    single_total = job->single_total;
+    single_now = job->single_now;
+    st = job->state;
+    pthread_mutex_unlock(&job->mtx);
+
+    int64_t total = 0;
+    if (sched_inited) {
+        scheduler_snapshot(&job->sched, NULL, NULL, &total);
+    } else {
+        total = single_now;
+        if (size <= 0 && single_total > 0) size = single_total;
+    }
+
+    if (out_total_downloaded) *out_total_downloaded = total;
+    if (out_file_size) *out_file_size = size;
+    if (out_state) *out_state = st;
+    return 0;
 }
 
 int download_job_save_state(const download_job_t *job, const char *state_path) {

@@ -39,6 +39,7 @@ int job_manager_add(job_manager_t *jm, download_job_t *job);
 download_job_t *job_manager_get(job_manager_t *jm, int job_id);
 int job_manager_count(job_manager_t *jm);
 int job_manager_wait_all(job_manager_t *jm);
+int job_manager_remove(job_manager_t *jm, download_job_t *job);
 
 int job_manager_enable_persistence(job_manager_t *jm, const char *json_path, int interval_ms);
 int job_manager_load_persisted(job_manager_t *jm, const char *json_path,

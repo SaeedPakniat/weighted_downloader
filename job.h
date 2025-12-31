@@ -56,3 +56,6 @@ void download_job_meta_free(download_job_meta_t *meta);
 
 int download_job_save_state(const download_job_t *job, const char *state_path);
 int download_job_load_state(download_job_t *job, const char *state_path);
+
+int download_job_snapshot(download_job_t *job, int64_t *out_total_downloaded,
+                          int64_t *out_file_size, download_job_state_t *out_state);
