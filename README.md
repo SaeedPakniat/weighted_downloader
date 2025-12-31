@@ -72,3 +72,8 @@ You can also start the GUI with no URL and add downloads from the dialog.
 - `downloads.json` stores job metadata (URL, output, scheduling, and state).
 - Per-job resume state is saved in `<output>.wdstate`.
 - On startup, the app loads `downloads.json` and resumes incomplete downloads automatically.
+
+## Report
+
+See `REPORT.md` for the weighted scheduling test results (10:1 and 10:5:1), fairness analysis,
+and performance summary.
