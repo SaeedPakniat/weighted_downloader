@@ -1,2 +1,3 @@
 /out.jpg
-/weights_log_4114875.csv
+/weights_log_*.csv
+/weighted_downloader

@@ -11,7 +11,7 @@
 static void usage(const char *prog) {
     fprintf(stderr,
         "Usage:\n"
-        "  %s [--no-ui] <URL> [output_file]\n\n"
+        "  %s [--no-ui] [--gui] <URL> [output_file]\n\n"
         "You will be prompted for partitions/weights and optional worker threads.\n",
         prog);
 }
@@ -24,9 +24,32 @@ int main(int argc, char **argv) {
 
     int argi = 1;
     int ui_enabled = 1;
-    if (strcmp(argv[argi], "--no-ui") == 0) {
+    int output_enabled = 1;
+    int gui_enabled = 0;
+    int no_ui = 0;
+    while (argi < argc && strncmp(argv[argi], "--", 2) == 0) {
+        if (strcmp(argv[argi], "--no-ui") == 0) {
+            no_ui = 1;
+            argi++;
+        } else if (strcmp(argv[argi], "--gui") == 0) {
+            gui_enabled = 1;
+            argi++;
+        } else {
+            usage(argv[0]);
+            return 1;
+        }
+    }
+    if (no_ui && gui_enabled) {
+        fprintf(stderr, "Error: --no-ui and --gui are mutually exclusive.\n");
+        return 1;
+    }
+    if (no_ui) {
         ui_enabled = 0;
-        argi++;
+        output_enabled = 1;
+    }
+    if (gui_enabled) {
+        ui_enabled = 0;
+        output_enabled = 0;
     }
     if (argc - argi < 1) {
         usage(argv[0]);
@@ -51,6 +74,8 @@ int main(int argc, char **argv) {
     cfg.progress_interval_ms = 200;
     cfg.csv_sample_interval_ms = 200;
     cfg.ui_enabled = ui_enabled;
+    cfg.output_enabled = output_enabled;
+    cfg.gui_enabled = gui_enabled;
 
     printf("URL: %s\nOutput: %s\n", url, out);
 

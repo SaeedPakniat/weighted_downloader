@@ -15,6 +15,7 @@
 
 #include "scheduler.h"
 #include "progress.h"
+#include "gui.h"
 #include "util.h"
 
 typedef struct head_info {
@@ -298,17 +299,29 @@ int downloader_run_interactive(const char *url, const char *output_path,
     int default_T = (P < 8) ? P : 8;
     int T = prompt_int("Enter number of worker threads T", 1, 128, default_T, 1);
 
+    int64_t *part_sizes = NULL;
+    if (cfg->gui_enabled) {
+        part_sizes = (int64_t*)xcalloc((size_t)P, sizeof(int64_t));
+        int64_t base = size / P;
+        int64_t rem = size % P;
+        for (int i = 0; i < P; i++) {
+            part_sizes[i] = base + (i < rem ? 1 : 0);
+        }
+    }
+
     // Pre-create output file and allocate size to avoid surprises.
     int fd = open(output_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
     if (fd < 0) {
         fprintf(stderr, "open(%s) failed: %s\n", output_path, strerror(errno));
         free(weights);
+        free(part_sizes);
         return -1;
     }
     if (ftruncate(fd, (off_t)size) != 0) {
         fprintf(stderr, "ftruncate failed: %s\n", strerror(errno));
         close(fd);
         free(weights);
+        free(part_sizes);
         return -1;
     }
 
@@ -318,17 +331,19 @@ int downloader_run_interactive(const char *url, const char *output_path,
         fprintf(stderr, "scheduler_init failed\n");
         close(fd);
         free(weights);
+        free(part_sizes);
         return -1;
     }
 
     // Create progress/logging threads
     progress_ctx_t pctx;
     if (progress_init(&pctx, &sched, P, size, cfg->progress_interval_ms,
-                      cfg->csv_sample_interval_ms, cfg->ui_enabled) != 0) {
+                      cfg->csv_sample_interval_ms, cfg->ui_enabled, cfg->output_enabled) != 0) {
         fprintf(stderr, "progress_init failed\n");
         scheduler_destroy(&sched);
         close(fd);
         free(weights);
+        free(part_sizes);
         return -1;
     }
 
@@ -341,6 +356,7 @@ int downloader_run_interactive(const char *url, const char *output_path,
         scheduler_destroy(&sched);
         close(fd);
         free(weights);
+        free(part_sizes);
         return -1;
     }
 
@@ -354,7 +370,17 @@ int downloader_run_interactive(const char *url, const char *output_path,
         scheduler_destroy(&sched);
         close(fd);
         free(weights);
+        free(part_sizes);
         return -1;
+    }
+
+    int gui_rc = 0;
+    if (cfg->gui_enabled) {
+        gui_rc = gui_run(&sched, P, size, weights, part_sizes);
+        if (gui_rc != 0) {
+            fprintf(stderr, "gui_run failed\n");
+            scheduler_signal_shutdown(&sched);
+        }
     }
 
     // Wait for workers to finish
@@ -372,8 +398,9 @@ int downloader_run_interactive(const char *url, const char *output_path,
     }
     close(fd);
     free(weights);
+    free(part_sizes);
 
-    if (!ok) {
+    if (gui_rc != 0 || !ok) {
         fprintf(stderr, "Not all partitions completed.\n");
         return -1;
     }

@@ -20,6 +20,8 @@ typedef struct downloader_config {
     int progress_interval_ms;
     int csv_sample_interval_ms;
     int ui_enabled;
+    int output_enabled;
+    int gui_enabled;
 } downloader_config_t;
 
 int downloader_run_interactive(const char *url, const char *output_path,

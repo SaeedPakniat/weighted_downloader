@@ -235,7 +235,8 @@ static void *csv_thread_main(void *argp) {
 }
 
 int progress_init(progress_ctx_t *p, scheduler_t *sched, int P, int64_t file_size,
-                  int progress_interval_ms, int csv_sample_interval_ms, int ui_enabled) {
+                  int progress_interval_ms, int csv_sample_interval_ms,
+                  int ui_enabled, int output_enabled) {
     memset(p, 0, sizeof(*p));
     p->sched = sched;
     p->P = P;
@@ -243,6 +244,7 @@ int progress_init(progress_ctx_t *p, scheduler_t *sched, int P, int64_t file_siz
     p->progress_interval_ms = progress_interval_ms;
     p->csv_sample_interval_ms = csv_sample_interval_ms;
     p->ui_enabled = ui_enabled;
+    p->output_enabled = output_enabled;
     p->stop_flag = 0;
     p->csv = NULL;
     p->start_ms = now_millis();
@@ -261,18 +263,22 @@ int progress_start(progress_ctx_t *p, const char *csv_path) {
 
     p->start_ms = now_millis();
 
-    if (pthread_create(&p->thread, NULL, progress_thread_main, p) != 0) {
-        fclose(p->csv);
-        p->csv = NULL;
-        return -1;
+    if (p->output_enabled) {
+        if (pthread_create(&p->thread, NULL, progress_thread_main, p) != 0) {
+            fclose(p->csv);
+            p->csv = NULL;
+            return -1;
+        }
+        p->thread_started = 1;
     }
     if (pthread_create(&p->csv_thread, NULL, csv_thread_main, p) != 0) {
         p->stop_flag = 1;
-        pthread_join(p->thread, NULL);
+        if (p->thread_started) pthread_join(p->thread, NULL);
         fclose(p->csv);
         p->csv = NULL;
         return -1;
     }
+    p->csv_thread_started = 1;
     return 0;
 }
 
@@ -284,8 +290,8 @@ void progress_stop(progress_ctx_t *p) {
     pthread_cond_broadcast(&p->sched->cv);
     pthread_mutex_unlock(&p->sched->mtx);
 
-    pthread_join(p->thread, NULL);
-    pthread_join(p->csv_thread, NULL);
+    if (p->thread_started) pthread_join(p->thread, NULL);
+    if (p->csv_thread_started) pthread_join(p->csv_thread, NULL);
 }
 
 void progress_destroy(progress_ctx_t *p) {
