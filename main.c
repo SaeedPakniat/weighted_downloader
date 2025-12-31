@@ -6,22 +6,20 @@
 #include <errno.h>
 
 #include "downloader.h"
+#include "job_manager.h"
 #include "util.h"
 
 static void usage(const char *prog) {
     fprintf(stderr,
         "Usage:\n"
-        "  %s [--no-ui] [--gui] <URL> [output_file]\n\n"
+        "  %s [--no-ui] [--gui] <URL> [output_file]\n"
+        "  %s [--no-ui] [--gui]\n\n"
+        "When no URL is provided, the app resumes jobs from downloads.json.\n"
         "You will be prompted for partitions/weights and optional worker threads.\n",
-        prog);
+        prog, prog);
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        usage(argv[0]);
-        return 1;
-    }
-
     int argi = 1;
     int ui_enabled = 1;
     int output_enabled = 1;
@@ -51,13 +49,9 @@ int main(int argc, char **argv) {
         ui_enabled = 0;
         output_enabled = 0;
     }
-    if (argc - argi < 1) {
-        usage(argv[0]);
-        return 1;
-    }
-
-    const char *url = argv[argi];
-    const char *out = (argc - argi >= 2) ? argv[argi + 1] : "output.bin";
+    int have_url = (argc - argi >= 1);
+    const char *url = have_url ? argv[argi] : NULL;
+    const char *out = have_url ? ((argc - argi >= 2) ? argv[argi + 1] : "output.bin") : NULL;
 
     if (curl_global_init(CURL_GLOBAL_DEFAULT) != 0) {
         fprintf(stderr, "curl_global_init failed\n");
@@ -77,17 +71,59 @@ int main(int argc, char **argv) {
     cfg.output_enabled = output_enabled;
     cfg.gui_enabled = gui_enabled;
 
-    printf("URL: %s\nOutput: %s\n", url, out);
+    job_manager_t jm;
+    if (job_manager_init(&jm, 1) != 0) {
+        fprintf(stderr, "Failed to initialize job manager.\n");
+        curl_global_cleanup();
+        return 1;
+    }
+    job_manager_enable_persistence(&jm, "downloads.json", 1000);
 
-    int rc = downloader_run_interactive(url, out, &cfg);
+    int loaded = 0;
+    job_manager_load_persisted(&jm, "downloads.json", &cfg, &loaded);
 
-    curl_global_cleanup();
+    if (have_url) {
+        printf("URL: %s\nOutput: %s\n", url, out);
+        download_job_t *job = downloader_prepare_job_interactive(url, out, &cfg);
+        if (!job) {
+            fprintf(stderr, "Failed to configure download job.\n");
+            if (loaded == 0) {
+                job_manager_destroy(&jm);
+                curl_global_cleanup();
+                return 1;
+            }
+        } else {
+            job_manager_add(&jm, job);
+        }
+    }
 
-    if (rc != 0) {
-        fprintf(stderr, "Download failed.\n");
+    if (!have_url && loaded == 0) {
+        fprintf(stderr, "No persisted downloads to resume.\n");
+        job_manager_destroy(&jm);
+        curl_global_cleanup();
         return 1;
     }
 
-    printf("Download completed successfully.\n");
+    job_manager_start(&jm);
+    job_manager_wait_all(&jm);
+    job_manager_stop(&jm);
+
+    int count = job_manager_count(&jm);
+    int overall_ok = 1;
+    for (int i = 0; i < count; i++) {
+        download_job_t *job = job_manager_get(&jm, i);
+        if (download_job_result(job) != 0) overall_ok = 0;
+        download_job_destroy(job);
+    }
+    job_manager_destroy(&jm);
+
+    curl_global_cleanup();
+
+    if (!overall_ok) {
+        fprintf(stderr, "One or more downloads failed.\n");
+        return 1;
+    }
+
+    printf("Download manager finished.\n");
     return 0;
 }

@@ -36,6 +36,13 @@ Optional flags:
 ```
 Flags are mutually exclusive.
 
+Resume persisted jobs:
+```bash
+./weighted_downloader
+./weighted_downloader --no-ui
+./weighted_downloader --gui
+```
+
 Example GUI run:
 ```bash
 ./weighted_downloader --gui <URL> out.bin
@@ -51,3 +58,15 @@ Example GUI run:
 
 - Pause / Resume buttons
 - Quit button or window close (signals shutdown and exits cleanly)
+
+## Architecture (Phase 1)
+
+- `job.c`/`job.h` wrap the existing scheduler + worker pool into a reusable `download_job_t` API.
+- `job_manager.c`/`job_manager.h` provide a thread-safe manager that starts jobs with a max-active limit.
+- The CLI now prepares jobs interactively and runs them through the job manager.
+
+## Persistence (Phase 2)
+
+- `downloads.json` stores job metadata (URL, output, scheduling, and state).
+- Per-job resume state is saved in `<output>.wdstate`.
+- On startup, the app loads `downloads.json` and resumes incomplete downloads automatically.

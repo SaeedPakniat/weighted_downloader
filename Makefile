@@ -5,7 +5,7 @@ CFLAGS=-O2 -Wall -Wextra -pedantic -std=c11 $(GTK_CFLAGS)
 LDFLAGS=
 LDLIBS=-lcurl -lpthread -lncurses $(GTK_LIBS)
 
-OBJS=main.o downloader.o scheduler.o progress.o gui.o util.o
+OBJS=main.o downloader.o job.o job_manager.o scheduler.o progress.o gui.o util.o
 
 all: weighted_downloader
 

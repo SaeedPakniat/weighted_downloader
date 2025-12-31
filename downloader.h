@@ -26,3 +26,7 @@ typedef struct downloader_config {
 
 int downloader_run_interactive(const char *url, const char *output_path,
                                const downloader_config_t *cfg);
+
+typedef struct download_job download_job_t;
+download_job_t *downloader_prepare_job_interactive(const char *url, const char *output_path,
+                                                   const downloader_config_t *cfg);
