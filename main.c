@@ -81,7 +81,9 @@ int main(int argc, char **argv) {
     job_manager_enable_persistence(&jm, "downloads.json", 1000);
 
     int loaded = 0;
-    job_manager_load_persisted(&jm, "downloads.json", &cfg, &loaded);
+    if (gui_enabled || !have_url) {
+        job_manager_load_persisted(&jm, "downloads.json", &cfg, &loaded);
+    }
 
     if (have_url) {
         printf("URL: %s\nOutput: %s\n", url, out);

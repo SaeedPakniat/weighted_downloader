@@ -21,9 +21,11 @@ typedef struct partition_desc {
     int64_t total_bytes;
     int64_t downloaded_bytes; // updated on successful writes
     int weight;
+    int64_t finished_ms;      // timestamp when partition completed, -1 if not finished
 
     // DRR deficit in bytes
     int64_t deficit;
+    int64_t last_round;
     int finished;
 } partition_desc_t;
 
@@ -40,10 +42,13 @@ typedef struct scheduler {
 
     // DRR round-robin pointer
     int rr_index;
+    int64_t round_id;
 
     // retry queue for failed blocks
     task_block_t *retry_head;
     task_block_t *retry_tail;
+
+    int64_t start_ms;
 
     int paused;
     int shutdown;

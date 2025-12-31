@@ -187,6 +187,7 @@ static int http_range_probe_0_0(const char *url, const downloader_config_t *cfg,
 typedef struct pwrite_ctx {
     int fd;
     int64_t cur_off;
+    int64_t bytes_written;
     int error;
 } pwrite_ctx_t;
 
@@ -206,10 +207,26 @@ static size_t pwrite_cb(char *ptr, size_t size, size_t nmemb, void *userdata) {
             return 0;
         }
         ctx->cur_off += (int64_t)w;
+        ctx->bytes_written += (int64_t)w;
         p += (size_t)w;
         left -= (size_t)w;
     }
     return total;
+}
+
+static int is_transient_curl(CURLcode res) {
+    switch (res) {
+        case CURLE_OPERATION_TIMEDOUT:
+        case CURLE_COULDNT_CONNECT:
+        case CURLE_COULDNT_RESOLVE_HOST:
+        case CURLE_RECV_ERROR:
+        case CURLE_SEND_ERROR:
+        case CURLE_GOT_NOTHING:
+        case CURLE_PARTIAL_FILE:
+            return 1;
+        default:
+            return 0;
+    }
 }
 
 static int job_should_stop(const download_job_t *job) {
@@ -370,66 +387,116 @@ static int single_thread_progress(void *clientp, double dltotal, double dlnow,
 static int single_thread_download(download_job_t *job) {
     printf("[Fallback] Server does not support Range requests. Using single-thread download.\n");
 
-    int fd = open(job->output_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
-    if (fd < 0) {
-        fprintf(stderr, "open(%s) failed: %s\n", job->output_path, strerror(errno));
-        return -1;
-    }
+    int max_retries = job->cfg.max_retries_per_block;
+    for (int attempt = 0; attempt <= max_retries; attempt++) {
+        int fd = open(job->output_path, O_CREAT | O_TRUNC | O_WRONLY, 0644);
+        if (fd < 0) {
+            fprintf(stderr, "open(%s) failed: %s\n", job->output_path, strerror(errno));
+            return -1;
+        }
 
-    CURL *curl = curl_easy_init();
-    if (!curl) {
-        close(fd);
-        return -1;
-    }
+        CURL *curl = curl_easy_init();
+        if (!curl) {
+            close(fd);
+            return -1;
+        }
 
-    pwrite_ctx_t wctx = {.fd = fd, .cur_off = 0, .error = 0};
-    long code = 0;
+        pwrite_ctx_t wctx = {.fd = fd, .cur_off = 0, .bytes_written = 0, .error = 0};
+        long code = 0;
 
-    curl_easy_setopt(curl, CURLOPT_URL, job->url);
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+        curl_easy_setopt(curl, CURLOPT_URL, job->url);
+        curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, pwrite_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wctx);
+        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, pwrite_cb);
+        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &wctx);
 
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, job->cfg.connect_timeout_sec);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, job->cfg.low_speed_time_sec);
-    curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, job->cfg.low_speed_limit_bytes);
+        curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, job->cfg.connect_timeout_sec);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_TIME, job->cfg.low_speed_time_sec);
+        curl_easy_setopt(curl, CURLOPT_LOW_SPEED_LIMIT, job->cfg.low_speed_limit_bytes);
 
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
 #if LIBCURL_VERSION_NUM >= 0x072000
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, single_thread_xferinfo);
-    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, job);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, single_thread_xferinfo);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, job);
 #else
-    curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, single_thread_progress);
-    curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, job);
+        curl_easy_setopt(curl, CURLOPT_PROGRESSFUNCTION, single_thread_progress);
+        curl_easy_setopt(curl, CURLOPT_PROGRESSDATA, job);
 #endif
 
-    CURLcode res = curl_easy_perform(curl);
-    if (res != CURLE_OK) {
+        CURLcode res = curl_easy_perform(curl);
         if (res == CURLE_ABORTED_BY_CALLBACK && job_should_stop(job)) {
             curl_easy_cleanup(curl);
             close(fd);
             return 1;
         }
-        fprintf(stderr, "curl_easy_perform failed: %s\n", curl_easy_strerror(res));
+
+        if (res == CURLE_OK) {
+            curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+        }
+
+        int ok = 0;
+        int retryable = 0;
+        if (res == CURLE_OK && wctx.error == 0 && code >= 200 && code < 300) {
+            curl_off_t cl = -1;
+#if LIBCURL_VERSION_NUM >= 0x073700
+            if (curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &cl) == CURLE_OK) {
+                if (cl > 0 && wctx.bytes_written != (int64_t)cl) {
+                    ok = 0;
+                    retryable = 1;
+                } else {
+                    ok = 1;
+                }
+            } else {
+                ok = 1;
+            }
+#else
+            double cld = -1.0;
+            if (curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD, &cld) == CURLE_OK) {
+                if (cld > 0.0 && wctx.bytes_written != (int64_t)cld) {
+                    ok = 0;
+                    retryable = 1;
+                } else {
+                    ok = 1;
+                }
+            } else {
+                ok = 1;
+            }
+#endif
+            if (ok && job->file_size > 0 && wctx.bytes_written != job->file_size) {
+                ok = 0;
+                retryable = 1;
+            }
+        } else {
+            retryable = (res != CURLE_OK) ? is_transient_curl(res) : 0;
+        }
+
         curl_easy_cleanup(curl);
+        if (fsync(fd) != 0) {
+            fprintf(stderr, "fsync failed: %s\n", strerror(errno));
+        }
         close(fd);
-        return -1;
-    }
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-    if (code < 200 || code >= 300) {
-        fprintf(stderr, "HTTP response code %ld\n", code);
-        curl_easy_cleanup(curl);
-        close(fd);
-        return -1;
+
+        if (ok) return 0;
+
+        if (!retryable || attempt == max_retries) {
+            if (res != CURLE_OK) {
+                fprintf(stderr, "curl_easy_perform failed: %s\n", curl_easy_strerror(res));
+            } else if (wctx.error != 0) {
+                fprintf(stderr, "write failed: %s\n", strerror(wctx.error));
+            } else if (code < 200 || code >= 300) {
+                fprintf(stderr, "HTTP response code %ld\n", code);
+            } else {
+                fprintf(stderr, "short transfer detected (%" PRId64 " bytes written)\n",
+                        wctx.bytes_written);
+            }
+            return -1;
+        }
+
+        fprintf(stderr, "Transient error in single-thread download; retrying (%d/%d)\n",
+                attempt + 1, max_retries);
     }
 
-    curl_easy_cleanup(curl);
-    if (fsync(fd) != 0) {
-        fprintf(stderr, "fsync failed: %s\n", strerror(errno));
-    }
-    close(fd);
-    return 0;
+    return -1;
 }
 
 static void download_job_set_state(download_job_t *job, download_job_state_t state) {
@@ -457,7 +524,21 @@ static int download_job_run(download_job_t *job) {
     }
 
     if (size <= 0 || !range_supported) {
+        int64_t start_ms = now_millis();
         int rc = single_thread_download(job);
+        int64_t end_ms = now_millis();
+        if (rc == 0) {
+            double elapsed_s = (double)(end_ms - start_ms) / 1000.0;
+            if (elapsed_s <= 0.0) elapsed_s = 0.001;
+            struct stat st;
+            int64_t bytes = 0;
+            if (stat(job->output_path, &st) == 0) {
+                bytes = (int64_t)st.st_size;
+            }
+            double mbps = (double)bytes / (1024.0 * 1024.0) / elapsed_s;
+            printf("Summary: total_time=%.3fs avg_throughput=%.3f MiB/s bytes=%" PRId64 "\n",
+                   elapsed_s, mbps, bytes);
+        }
         if (rc == 1) return 1;
         return rc;
     }
@@ -571,6 +652,31 @@ static int download_job_run(download_job_t *job) {
     job->progress_inited = 0;
 
     int ok = scheduler_all_done(&job->sched);
+    int64_t start_ms = 0;
+    int64_t end_ms = now_millis();
+    int64_t total_dl = 0;
+    int verify_ok = 1;
+    int max_weight = 1;
+    for (int i = 0; i < job->P; i++) {
+        if (job->weights[i] > max_weight) max_weight = job->weights[i];
+    }
+    int64_t *finish_ms = (int64_t*)calloc((size_t)job->P, sizeof(int64_t));
+    if (finish_ms) {
+        for (int i = 0; i < job->P; i++) finish_ms[i] = -1;
+    }
+
+    pthread_mutex_lock(&job->sched.mtx);
+    start_ms = job->sched.start_ms;
+    for (int i = 0; i < job->sched.num_partitions; i++) {
+        partition_desc_t *p = &job->sched.parts[i];
+        total_dl += p->downloaded_bytes;
+        if (p->downloaded_bytes != p->total_bytes) verify_ok = 0;
+        if (finish_ms && p->weight == max_weight) {
+            finish_ms[i] = p->finished_ms;
+        }
+    }
+    pthread_mutex_unlock(&job->sched.mtx);
+
     scheduler_destroy(&job->sched);
     pthread_mutex_lock(&job->mtx);
     job->sched_inited = 0;
@@ -582,13 +688,33 @@ static int download_job_run(download_job_t *job) {
     close(fd);
     job->out_fd = -1;
 
-    if (!ok) {
+    if (!ok || !verify_ok || (size > 0 && total_dl != size)) {
         fprintf(stderr, "Not all partitions completed.\n");
+        free(finish_ms);
         return -1;
     }
 
     printf("CSV log written: %s\n", csv_name);
     printf("Tip: verify correctness with: sha256sum %s\n", job->output_path);
+    {
+        double elapsed_s = (double)(end_ms - start_ms) / 1000.0;
+        if (elapsed_s <= 0.0) elapsed_s = 0.001;
+        double mbps = (double)size / (1024.0 * 1024.0) / elapsed_s;
+        printf("Summary: total_time=%.3fs avg_throughput=%.3f MiB/s bytes=%" PRId64 "\n",
+               elapsed_s, mbps, size);
+        printf("High-weight partition completion times (weight=%d):\n", max_weight);
+        for (int i = 0; i < job->P; i++) {
+            if (job->weights[i] == max_weight) {
+                if (finish_ms && finish_ms[i] >= 0) {
+                    int64_t delta = finish_ms[i] - start_ms;
+                    printf("  partition %d: %" PRId64 " ms\n", i, delta);
+                } else {
+                    printf("  partition %d: not finished\n", i);
+                }
+            }
+        }
+    }
+    free(finish_ms);
     return 0;
 }
 

@@ -33,7 +33,9 @@ int scheduler_init(scheduler_t *s, int P, int64_t file_size, size_t block_size,
     s->block_size = block_size;
     s->max_retries = max_retries;
     s->rr_index = 0;
+    s->round_id = 0;
     s->paused = 0;
+    s->start_ms = now_millis();
 
     if (pthread_mutex_init(&s->mtx, NULL) != 0) return -1;
     if (pthread_cond_init(&s->cv, NULL) != 0) {
@@ -67,7 +69,9 @@ int scheduler_init(scheduler_t *s, int P, int64_t file_size, size_t block_size,
         s->parts[i].downloaded_bytes = 0;
         s->parts[i].weight = weights ? weights[i] : 1;
         s->parts[i].deficit = 0;
+        s->parts[i].last_round = -1;
         s->parts[i].finished = (len == 0);
+        s->parts[i].finished_ms = s->parts[i].finished ? s->start_ms : -1;
 
         off += len;
     }
@@ -152,8 +156,14 @@ void scheduler_mark_downloaded(scheduler_t *s, int partition_id, int64_t bytes) 
     pthread_mutex_lock(&s->mtx);
     partition_desc_t *p = &s->parts[partition_id];
     p->downloaded_bytes += bytes;
-    if (p->downloaded_bytes >= p->total_bytes) {
+    int became_finished = 0;
+    if (!p->finished && p->downloaded_bytes >= p->total_bytes) {
         p->finished = 1;
+        became_finished = 1;
+        if (p->finished_ms < 0) p->finished_ms = now_millis();
+    }
+    if (became_finished || all_done_nolock(s)) {
+        pthread_cond_broadcast(&s->cv);
     }
     pthread_mutex_unlock(&s->mtx);
 }
@@ -189,32 +199,40 @@ static int drr_pick_next_block_nolock(scheduler_t *s, task_block_t *out) {
 
     if (all_done_nolock(s)) return 0;
 
-    // Try up to 2*P iterations to find schedulable block after adding quantum.
-    // This avoids needing a separate "round" concept while still progressing.
-    for (int tries = 0; tries < 2 * P; tries++) {
+    // Visit up to P partitions to find a schedulable block.
+    for (int tries = 0; tries < P; tries++) {
         int idx = s->rr_index % P;
-        s->rr_index = (s->rr_index + 1) % P;
-
         partition_desc_t *p = &s->parts[idx];
-        if (p->finished) continue;
+
+        if (p->finished) {
+            s->rr_index = (s->rr_index + 1) % P;
+            if (s->rr_index == 0) s->round_id++;
+            continue;
+        }
 
         int64_t remaining = (p->end + 1) - p->next_off;
         if (remaining <= 0) {
-            p->finished = 1;
+            s->rr_index = (s->rr_index + 1) % P;
+            if (s->rr_index == 0) s->round_id++;
             continue;
         }
 
-        int64_t quantum = (int64_t)p->weight * (int64_t)s->block_size;
-        // Accrue quantum each visit (classic DRR)
-        p->deficit += quantum;
+        // Accrue quantum once per round visit.
+        if (p->last_round != s->round_id) {
+            int64_t quantum = (int64_t)p->weight * (int64_t)s->block_size;
+            p->deficit += quantum;
+            p->last_round = s->round_id;
+        }
 
         size_t want = (remaining < (int64_t)s->block_size) ? (size_t)remaining : s->block_size;
         if (p->deficit < (int64_t)want) {
-            // not enough credit yet, move on
+            // Not enough credit; move on to next partition in this round.
+            s->rr_index = (s->rr_index + 1) % P;
+            if (s->rr_index == 0) s->round_id++;
             continue;
         }
 
-        // Allocate this block
+        // Allocate this block.
         out->partition_id = idx;
         out->start = p->next_off;
         out->len = want;
@@ -224,11 +242,14 @@ static int drr_pick_next_block_nolock(scheduler_t *s, task_block_t *out) {
         p->next_off += (int64_t)want;
         p->deficit -= (int64_t)want;
 
-        // If this was the last block, finish will be set when downloaded bytes catches up,
-        // or we could set it here when next_off passes end+1.
-        if (p->next_off > p->end) {
-            // Do not mark finished here; a retry could still be pending.
-            // Completion is based on downloaded_bytes.
+        // If there's still deficit for another block, keep rr_index to drain it.
+        int64_t remaining_after = (p->end + 1) - p->next_off;
+        size_t next_want = (remaining_after > 0 && remaining_after < (int64_t)s->block_size)
+            ? (size_t)remaining_after
+            : s->block_size;
+        if (remaining_after <= 0 || p->deficit < (int64_t)next_want) {
+            s->rr_index = (s->rr_index + 1) % P;
+            if (s->rr_index == 0) s->round_id++;
         }
         return 1;
     }
@@ -287,6 +308,7 @@ int scheduler_snapshot(scheduler_t *s, int64_t *per_part_downloaded, int *per_pa
 typedef struct write_ctx {
     int fd;
     int64_t cur;
+    int64_t bytes_written;
     int error;
 } write_ctx_t;
 
@@ -305,6 +327,7 @@ static size_t worker_pwrite_cb(char *ptr, size_t size, size_t nmemb, void *userd
             return 0;
         }
         ctx->cur += (int64_t)w;
+        ctx->bytes_written += (int64_t)w;
         p += (size_t)w;
         left -= (size_t)w;
     }
@@ -359,7 +382,7 @@ static void *worker_main(void *argp) {
         char range[128];
         snprintf(range, sizeof(range), "%" PRId64 "-%" PRId64, task.start, end);
 
-        write_ctx_t wctx = {.fd = arg->out_fd, .cur = task.start, .error = 0};
+        write_ctx_t wctx = {.fd = arg->out_fd, .cur = task.start, .bytes_written = 0, .error = 0};
         long code = 0;
 
         curl_easy_setopt(curl, CURLOPT_RANGE, range);
@@ -374,7 +397,7 @@ static void *worker_main(void *argp) {
         int ok = 0;
         if (res == CURLE_OK && wctx.error == 0) {
             // For range request, expect 206 Partial Content. Some servers might return 200 if they ignore range.
-            if (code == 206) {
+            if (code == 206 && wctx.bytes_written == (int64_t)task.len) {
                 ok = 1;
             } else {
                 ok = 0;
@@ -382,7 +405,7 @@ static void *worker_main(void *argp) {
         }
 
         if (ok) {
-            scheduler_mark_downloaded(arg->sched, task.partition_id, (int64_t)task.len);
+            scheduler_mark_downloaded(arg->sched, task.partition_id, wctx.bytes_written);
             // Nudge sleepers: deficits may be low, but progress thread or retries could happen
             pthread_mutex_lock(&arg->sched->mtx);
             pthread_cond_broadcast(&arg->sched->cv);
